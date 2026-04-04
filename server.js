@@ -7,7 +7,7 @@ app.get("/health", (req, res) => {
 res.json({ ok: true });
 });
 
-app.post("/search", (req, res) => {
+app.get("/search", (req, res) => {
 res.json({ ok: true, message: "search endpoint ready" });
 });
 
