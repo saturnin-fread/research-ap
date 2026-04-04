@@ -10,6 +10,7 @@ const PORT = process.env.PORT || 8080;
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const REDIS_URL = process.env.REDIS_URL || "";
 const BROWSER_WORKER_URL = process.env.BROWSER_WORKER_URL || "";
+const RESEARCH_API_KEY = process.env.RESEARCH_API_KEY || "";
 
 const pool = DATABASE_URL
 ? new Pool({
