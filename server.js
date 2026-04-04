@@ -40,6 +40,30 @@ created_at TIMESTAMP DEFAULT NOW()
 `);
 }
 
+app.use((req, res, next) => {
+if (!RESEARCH_API_KEY) {
+return next();
+}
+
+if (req.path === "/" || req.path === "/health") {
+return next();
+}
+
+const authHeader = req.headers.authorization || "";
+const token = authHeader.startsWith("Bearer ")
+? authHeader.slice("Bearer ".length)
+: "";
+
+if (token !== RESEARCH_API_KEY) {
+return res.status(401).json({
+ok: false,
+error: "Unauthorized"
+});
+}
+
+next();
+});
+
 app.get("/", (req, res) => {
 res.json({
 ok: true,
@@ -54,7 +78,8 @@ ok: true,
 service: "research-api",
 postgres: false,
 redis: false,
-browserWorkerConfigured: Boolean(BROWSER_WORKER_URL)
+browserWorkerConfigured: Boolean(BROWSER_WORKER_URL),
+authEnabled: Boolean(RESEARCH_API_KEY)
 };
 
 try {
