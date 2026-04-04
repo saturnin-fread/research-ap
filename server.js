@@ -1,20 +1,80 @@
 const express = require("express");
+const { Pool } = require("pg");
+const Redis = require("ioredis");
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 8080;
+
+const DATABASE_URL = process.env.DATABASE_URL || "";
+const REDIS_URL = process.env.REDIS_URL || "";
+const BROWSER_WORKER_URL = process.env.BROWSER_WORKER_URL || "";
+
+const pool = DATABASE_URL
+? new Pool({
+connectionString: DATABASE_URL,
+ssl: { rejectUnauthorized: false }
+})
+: null;
+
+const redis = REDIS_URL
+? new Redis(REDIS_URL, {
+maxRetriesPerRequest: 1
+})
+: null;
+
+async function ensureTables() {
+if (!pool) return;
+
+await pool.query(`
+CREATE TABLE IF NOT EXISTS research_reports (
+id SERIAL PRIMARY KEY,
+query TEXT NOT NULL,
+source_url TEXT,
+title TEXT,
+content TEXT,
+created_at TIMESTAMP DEFAULT NOW()
+)
+`);
+}
 
 app.get("/", (req, res) => {
 res.json({
 ok: true,
 service: "research-api",
-endpoints: ["/health", "/search?q=chatgpt", "/extract?url=https://example.com"]
+endpoints: ["/health", "/search?q=...", "/extract?url=..."]
 });
 });
 
-app.get("/health", (req, res) => {
-res.json({ ok: true });
+app.get("/health", async (req, res) => {
+const status = {
+ok: true,
+service: "research-api",
+postgres: false,
+redis: false,
+browserWorkerConfigured: Boolean(BROWSER_WORKER_URL)
+};
+
+try {
+if (pool) {
+await pool.query("SELECT 1");
+status.postgres = true;
+}
+} catch (error) {
+status.ok = false;
+}
+
+try {
+if (redis) {
+await redis.ping();
+status.redis = true;
+}
+} catch (error) {
+status.ok = false;
+}
+
+res.json(status);
 });
 
 app.get("/search", async (req, res) => {
@@ -79,6 +139,15 @@ snippet: sub.Text
 }
 }
 
+if (redis) {
+await redis.set(
+"search:" + q.toLowerCase(),
+JSON.stringify(results.slice(0, 10)),
+"EX",
+3600
+);
+}
+
 res.json({
 ok: true,
 query: q,
@@ -104,62 +173,41 @@ error: "Missing query parameter: url"
 });
 }
 
-let parsedUrl;
-try {
-parsedUrl = new URL(targetUrl);
-} catch (e) {
-return res.status(400).json({
+if (!BROWSER_WORKER_URL) {
+return res.status(500).json({
 ok: false,
-error: "Invalid URL"
+error: "BROWSER_WORKER_URL is not configured"
 });
 }
 
-if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-return res.status(400).json({
-ok: false,
-error: "Only http and https URLs are allowed"
-});
-}
-
-const response = await fetch(parsedUrl.toString(), {
+const response = await fetch(BROWSER_WORKER_URL + "/extract", {
+method: "POST",
 headers: {
-"user-agent": "Mozilla/5.0 (compatible; research-api/1.0)"
-}
+"content-type": "application/json"
+},
+body: JSON.stringify({ url: targetUrl })
 });
 
-if (!response.ok) {
+const data = await response.json();
+
+if (!response.ok || !data.ok) {
 return res.status(502).json({
 ok: false,
-error: "Upstream fetch failed with status " + response.status
+error: data.error || "Browser worker extract failed"
 });
 }
 
-const html = await response.text();
+if (pool) {
+await pool.query(
+`
+INSERT INTO research_reports (query, source_url, title, content)
+VALUES ($1, $2, $3, $4)
+`,
+["extract", data.finalUrl || targetUrl, data.title || "", data.content || ""]
+);
+}
 
-const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-const title = titleMatch ? titleMatch[1].replace(/\s+/g, " ").trim() : "";
-
-const content = html
-.replace(/<script[\s\S]*?<\/script>/gi, " ")
-.replace(/<style[\s\S]*?<\/style>/gi, " ")
-.replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
-.replace(/<[^>]+>/g, " ")
-.replace(/&nbsp;/gi, " ")
-.replace(/&amp;/gi, "&")
-.replace(/&lt;/gi, "<")
-.replace(/&gt;/gi, ">")
-.replace(/&quot;/gi, '"')
-.replace(/&#39;/gi, "'")
-.replace(/\s+/g, " ")
-.trim()
-.slice(0, 12000);
-
-res.json({
-ok: true,
-url: parsedUrl.toString(),
-title: title,
-content: content
-});
+res.json(data);
 } catch (error) {
 res.status(500).json({
 ok: false,
@@ -168,6 +216,16 @@ error: error.message
 }
 });
 
+async function start() {
+try {
+await ensureTables();
 app.listen(PORT, () => {
 console.log("research-api listening on " + PORT);
 });
+} catch (error) {
+console.error("Startup error:", error);
+process.exit(1);
+}
+}
+
+start();
