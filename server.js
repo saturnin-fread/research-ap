@@ -1,6 +1,7 @@
 const express = require("express");
 const { Pool } = require("pg");
 const Redis = require("ioredis");
+const cheerio = require("cheerio");
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -103,6 +104,41 @@ status.ok = false;
 res.json(status);
 });
 
+async function runWebSearch(query) {
+const searchUrl =
+"https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
+
+const response = await fetch(searchUrl, {
+headers: {
+"user-agent": "Mozilla/5.0 (compatible; research-api/1.0)"
+}
+});
+
+if (!response.ok) {
+throw new Error("Search upstream failed with status " + response.status);
+}
+
+const html = await response.text();
+const $ = cheerio.load(html);
+const results = [];
+
+$(".result").each((_, el) => {
+const title = $(el).find(".result__title a").first().text().trim();
+const url = $(el).find(".result__title a").first().attr("href") || "";
+const snippet = $(el).find(".result__snippet").first().text().trim();
+
+if (title && url) {
+results.push({
+title,
+url,
+snippet
+});
+}
+});
+
+return results.slice(0, 10);
+}
+
 app.get("/search", async (req, res) => {
 try {
 const q = String(req.query.q || "").trim();
@@ -114,71 +150,33 @@ error: "Missing query parameter: q"
 });
 }
 
-const apiUrl =
-"https://api.duckduckgo.com/?q=" +
-encodeURIComponent(q) +
-"&format=json&no_html=1&skip_disambig=1";
-
-const response = await fetch(apiUrl, {
-headers: {
-"user-agent": "research-api/1.0"
-}
-});
-
-if (!response.ok) {
-return res.status(502).json({
-ok: false,
-error: "Upstream search failed with status " + response.status
-});
-}
-
-const data = await response.json();
-const results = [];
-
-if (data.AbstractURL) {
-results.push({
-title: data.Heading || q,
-url: data.AbstractURL,
-snippet: data.AbstractText || ""
-});
-}
-
-for (const item of data.RelatedTopics || []) {
-if (item.FirstURL && item.Text) {
-results.push({
-title: item.Text.split(" - ")[0],
-url: item.FirstURL,
-snippet: item.Text
-});
-}
-
-if (Array.isArray(item.Topics)) {
-for (const sub of item.Topics) {
-if (sub.FirstURL && sub.Text) {
-results.push({
-title: sub.Text.split(" - ")[0],
-url: sub.FirstURL,
-snippet: sub.Text
-});
-}
-}
-}
-}
+const cacheKey = "search:" + q.toLowerCase();
 
 if (redis) {
-await redis.set(
-"search:" + q.toLowerCase(),
-JSON.stringify(results.slice(0, 10)),
-"EX",
-3600
-);
+const cached = await redis.get(cacheKey);
+if (cached) {
+const parsed = JSON.parse(cached);
+return res.json({
+ok: true,
+query: q,
+count: parsed.length,
+results: parsed,
+cached: true
+});
+}
+}
+
+const results = await runWebSearch(q);
+
+if (redis) {
+await redis.set(cacheKey, JSON.stringify(results), "EX", 3600);
 }
 
 res.json({
 ok: true,
 query: q,
 count: results.length,
-results: results.slice(0, 10)
+results
 });
 } catch (error) {
 res.status(500).json({
